@@ -34,13 +34,21 @@ def parse_targets(target_str: str) -> List[str]:
             console.print(f"[bold red]Error:[/] Invalid IP, CIDR, or hostname: {target_str}")
             sys.exit(1)
 
+def get_targets(args) -> List[str]:
+    targets = []
+    if args.target:
+        targets.extend(parse_targets(args.target))
+    if args.network:
+        targets.extend(parse_targets(args.network))
+    return list(dict.fromkeys(targets))
+
 def parse_ports(args) -> List[int]:
     """Parse ports based on arguments."""
-    if args.a:
+    if args.all:
         return list(range(1, 65536))
-    if args.p:
+    if args.ports:
         ports = []
-        for p in args.p.split(','):
+        for p in args.ports.split(','):
             p = p.strip()
             if p.isdigit():
                 port_num = int(p)
@@ -148,7 +156,7 @@ def guess_os(banner: str) -> str:
     
     return "-"
 
-async def scan_target(target: str, ports: List[int], sem: asyncio.Semaphore, table: Table, progress: Progress, task_id: TaskID, status_bar: StatusBar, results_list: list):
+async def scan_target(target: str, ports: List[int], sem: asyncio.Semaphore, table, progress, task_id, status_bar: StatusBar, results_list: list, args):
     """Scan ports on a single target asynchronously."""
     async def scan_port(port: int):
         async with sem:
@@ -172,93 +180,134 @@ async def scan_target(target: str, ports: List[int], sem: asyncio.Semaphore, tab
                 state_text = "[bold green]Open[/]"
             elif state == "Filtered":
                 status_bar.filtered += 1
-                should_show = True
+                if args.show_filtered or args.show_all:
+                    should_show = True
                 state_text = "[bold yellow]Filtered[/]"
             elif state == "Closed":
                 status_bar.closed += 1
+                if args.show_all:
+                    should_show = True
+                state_text = "[bold red]Closed[/]"
 
-            if should_show:
+            if should_show and not args.silent and table:
                 os_guess = guess_os(banner)
                 display_banner = banner if banner else "-"
                 alert_display = f"[bold red]{alert}[/]" if alert != "-" else "[gray50]-[/]"
                 table.add_row(target, str(port), state_text, service, display_banner, os_guess, alert_display)
-            progress.advance(task_id)
+            
+            if not args.silent and progress:
+                progress.advance(task_id)
 
     tasks = [asyncio.create_task(scan_port(port)) for port in ports]
     await asyncio.gather(*tasks)
 
 async def main(args):
     start_time = time.time()
-    targets = parse_targets(args.target)
+    targets = get_targets(args)
     ports = parse_ports(args)
     sem = asyncio.Semaphore(1000)
 
     status_bar = StatusBar()
     results_list = []
 
-    # UI Setup
-    table = Table(title="VibeScan Results", expand=True)
-    table.add_column("Target", style="cyan", no_wrap=True)
-    table.add_column("Port", justify="right", style="magenta", no_wrap=True)
-    table.add_column("State", justify="center", no_wrap=True)
-    table.add_column("Service", style="green", no_wrap=True)
-    table.add_column("Banner", style="yellow")
-    table.add_column("OS Guess", justify="center")
-    table.add_column("Alerts", justify="center")
+    if not args.silent:
+        # UI Setup
+        table = Table(title="VibeScan Results", expand=True)
+        table.add_column("Target", style="cyan", no_wrap=True)
+        table.add_column("Port", justify="right", style="magenta", no_wrap=True)
+        table.add_column("State", justify="center", no_wrap=True)
+        table.add_column("Service", style="green", no_wrap=True)
+        table.add_column("Banner", style="yellow")
+        table.add_column("OS Guess", justify="center")
+        table.add_column("Alerts", justify="center")
 
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=None),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("({task.completed}/{task.total})"),
-        expand=True
-    )
-
-    group = Group(table, "", status_bar, "", progress)
-
-    total_scans = len(targets) * len(ports)
-    task_id = progress.add_task("[cyan]Scanning...", total=total_scans)
-
-    # Use Live context manager to render the UI dynamically
-    try:
-        with Live(group, refresh_per_second=10, console=console, transient=False) as live:
-            target_tasks = [scan_target(t, ports, sem, table, progress, task_id, status_bar, results_list) for t in targets]
-            await asyncio.gather(*target_tasks)
-            
-        if table.row_count == 0:
-            console.print("\n[bold yellow]No open ports were found on the specified targets for the given ports.[/]")
-            
-        # Final Summary
-        time_taken = time.time() - start_time
-        summary_text = (
-            f"Total Ports Scanned: {total_scans}\n"
-            f"Time Taken: {time_taken:.2f} seconds\n\n"
-            f"[bold green]Open:[/] {status_bar.open}  |  "
-            f"[bold yellow]Filtered:[/] {status_bar.filtered}  |  "
-            f"[bold red]Closed:[/] {status_bar.closed}"
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=None),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("({task.completed}/{task.total})"),
+            expand=True
         )
-        console.print(Panel(summary_text, title="Scan Report", border_style="cyan", expand=False))
-        
+
+        group = Group(table, "", status_bar, "", progress)
+
+        total_scans = len(targets) * len(ports)
+        task_id = progress.add_task("[cyan]Scanning...", total=total_scans)
+
+        # Use Live context manager to render the UI dynamically
+        try:
+            with Live(group, refresh_per_second=10, console=console, transient=False) as live:
+                target_tasks = [scan_target(t, ports, sem, table, progress, task_id, status_bar, results_list, args) for t in targets]
+                await asyncio.gather(*target_tasks)
+                
+            if table.row_count == 0:
+                console.print("\n[bold yellow]No open ports were found on the specified targets for the given ports.[/]")
+                
+            # Final Summary
+            time_taken = time.time() - start_time
+            summary_text = (
+                f"Total Ports Scanned: {total_scans}\n"
+                f"Time Taken: {time_taken:.2f} seconds\n\n"
+                f"[bold green]Open:[/] {status_bar.open}  |  "
+                f"[bold yellow]Filtered:[/] {status_bar.filtered}  |  "
+                f"[bold red]Closed:[/] {status_bar.closed}"
+            )
+            console.print(Panel(summary_text, title="Scan Report", border_style="cyan", expand=False))
+            
+            if args.output:
+                with open(args.output, 'w') as f:
+                    json.dump(results_list, f, indent=4)
+                console.print(f"\n[bold green]Detailed results saved to {args.output}[/]")
+
+        except KeyboardInterrupt:
+            # Avoid traceback spam if someone presses Ctrl+C inside the Live block
+            raise # We catch it outside
+    else:
+        # Silent Mode Logic
+        target_tasks = [scan_target(t, ports, sem, None, None, None, status_bar, results_list, args) for t in targets]
+        await asyncio.gather(*target_tasks)
         if args.output:
             with open(args.output, 'w') as f:
                 json.dump(results_list, f, indent=4)
-            console.print(f"\n[bold green]Detailed results saved to {args.output}[/]")
 
-    except KeyboardInterrupt:
-        # Avoid traceback spam if someone presses Ctrl+C inside the Live block
-        raise # We catch it outside
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="VibeScan - High-performance asynchronous port scanner")
-    parser.add_argument("target", help="IP, CIDR, or hostname to scan")
-    parser.add_argument("-a", action="store_true", help="Scan all ports (1-65535)")
-    parser.add_argument("-p", type=str, help="Comma-separated list of ports to scan (e.g., 22,80,443)")
-    parser.add_argument("-o", "--output", type=str, help="Output file to save detailed JSON log (e.g. vscan_results.json)")
+def cli_main():
+    parser = argparse.ArgumentParser(
+        description="VibeScan: An Asyncio-powered specialist port scanner with OS inference and vulnerability matching."
+    )
+    
+    target_group = parser.add_argument_group('Targeting')
+    target_group.add_argument("-t", "--target", help="Single IP or hostname to scan")
+    target_group.add_argument("-n", "--network", help="CIDR network to scan (e.g., 192.168.1.0/24)")
+    
+    port_group = parser.add_argument_group('Port Selection')
+    port_group.add_argument("-a", "--all", action="store_true", help="Scan all ports (1-65535)")
+    port_group.add_argument("-p", "--ports", type=str, help="Comma-separated list of ports (e.g., 22,80,443)")
+    
+    out_group = parser.add_argument_group('Output')
+    out_group.add_argument("-o", "--output", type=str, help="Output file to save detailed JSON log")
+    out_group.add_argument("-s", "--silent", action="store_true", help="Run entirely in background without UI")
+    
+    disp_group = parser.add_argument_group('Display')
+    disp_group.add_argument("--show-filtered", action="store_true", help="Include filtered ports in standard output")
+    disp_group.add_argument("--show-all", action="store_true", help="Include both filtered and closed ports")
+    
     args = parser.parse_args()
-
+    
+    if not args.target and not args.network:
+        console.print("[bold red]Error:[/] You must specify either a target (-t) or a network (-n).")
+        sys.exit(1)
+        
+    if args.silent and not args.output:
+        console.print("[bold red]Error:[/] Silent mode requires an output file (-o) to save results.")
+        sys.exit(1)
+        
     try:
         asyncio.run(main(args))
     except KeyboardInterrupt:
-        console.print("\n[bold yellow]Scan interrupted by user. Showing partial results.[/]")
+        if not args.silent:
+            console.print("\n[bold yellow]Scan interrupted by user. Showing partial results.[/]")
         sys.exit(0)
+
+if __name__ == "__main__":
+    cli_main()
