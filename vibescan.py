@@ -174,3 +174,4 @@ if __name__ == "__main__":
         asyncio.run(main(args))
     except KeyboardInterrupt:
         console.print("\n[bold yellow]Scan interrupted by user. Showing partial results.[/]")
+        sys.exit(0)
