@@ -101,6 +101,23 @@ async def check_port(ip: str, port: int, timeout: float = 1.0) -> Tuple[str, str
     except Exception:
         return "Closed", get_service_name(port), "-"
 
+VULN_DB = {
+    "php/5.": "Outdated PHP 5.x",
+    "iis/6.0": "Outdated IIS 6.0",
+    "vsftpd 2.3.4": "Backdoored vsftpd (2.3.4)",
+    "openssh_5.": "Outdated OpenSSH 5.x",
+    "apache/2.2": "Outdated Apache 2.2"
+}
+
+def check_vulnerability(banner: str) -> str:
+    if not banner:
+        return "-"
+    banner_lower = banner.lower()
+    for sig, risk in VULN_DB.items():
+        if sig.lower() in banner_lower:
+            return risk
+    return "-"
+
 class StatusBar:
     def __init__(self):
         self.open = 0
@@ -137,12 +154,15 @@ async def scan_target(target: str, ports: List[int], sem: asyncio.Semaphore, tab
         async with sem:
             state, service, banner = await check_port(target, port, timeout=1.0)
             
+            alert = check_vulnerability(banner)
+
             results_list.append({
                 "target": target,
                 "port": port,
                 "state": state,
                 "reason": service,
-                "banner": banner
+                "banner": banner,
+                "alert": alert if alert != "-" else ""
             })
 
             should_show = False
@@ -160,7 +180,8 @@ async def scan_target(target: str, ports: List[int], sem: asyncio.Semaphore, tab
             if should_show:
                 os_guess = guess_os(banner)
                 display_banner = banner if banner else "-"
-                table.add_row(target, str(port), state_text, service, display_banner, os_guess)
+                alert_display = f"[bold red]{alert}[/]" if alert != "-" else "[gray50]-[/]"
+                table.add_row(target, str(port), state_text, service, display_banner, os_guess, alert_display)
             progress.advance(task_id)
 
     tasks = [asyncio.create_task(scan_port(port)) for port in ports]
@@ -183,6 +204,7 @@ async def main(args):
     table.add_column("Service", style="green", no_wrap=True)
     table.add_column("Banner", style="yellow")
     table.add_column("OS Guess", justify="center")
+    table.add_column("Alerts", justify="center")
 
     progress = Progress(
         SpinnerColumn(),
