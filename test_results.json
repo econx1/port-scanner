@@ -1,0 +1,23 @@
+[
+    {
+        "target": "127.0.0.1",
+        "port": 22,
+        "state": "Closed",
+        "reason": "ssh",
+        "banner": "-"
+    },
+    {
+        "target": "127.0.0.1",
+        "port": 80,
+        "state": "Closed",
+        "reason": "http",
+        "banner": "-"
+    },
+    {
+        "target": "127.0.0.1",
+        "port": 443,
+        "state": "Closed",
+        "reason": "https",
+        "banner": "-"
+    }
+]

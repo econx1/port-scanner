@@ -5,11 +5,15 @@ import ipaddress
 import socket
 import re
 import sys
+import json
+import time
 from typing import List, Tuple
 from rich.live import Live
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TaskID
 from rich.console import Group, Console
+from rich.panel import Panel
+from rich.text import Text
 
 console = Console()
 
@@ -97,6 +101,15 @@ async def check_port(ip: str, port: int, timeout: float = 1.0) -> Tuple[str, str
     except Exception:
         return "Closed", get_service_name(port), "-"
 
+class StatusBar:
+    def __init__(self):
+        self.open = 0
+        self.filtered = 0
+        self.closed = 0
+        
+    def __rich__(self) -> Text:
+        return Text(f"[Scanning...] Open: {self.open} | Filtered: {self.filtered} | Closed: {self.closed}", style="bold cyan")
+
 def guess_os(banner: str) -> str:
     """Fast guess OS fingerprinting based on banner keywords."""
     if not banner:
@@ -118,22 +131,31 @@ def guess_os(banner: str) -> str:
     
     return "-"
 
-async def scan_target(target: str, ports: List[int], sem: asyncio.Semaphore, table: Table, progress: Progress, task_id: TaskID, show_filtered: bool, show_all: bool):
+async def scan_target(target: str, ports: List[int], sem: asyncio.Semaphore, table: Table, progress: Progress, task_id: TaskID, status_bar: StatusBar, results_list: list):
     """Scan ports on a single target asynchronously."""
     async def scan_port(port: int):
         async with sem:
             state, service, banner = await check_port(target, port, timeout=1.0)
             
+            results_list.append({
+                "target": target,
+                "port": port,
+                "state": state,
+                "reason": service,
+                "banner": banner
+            })
+
             should_show = False
             if state == "Open":
+                status_bar.open += 1
                 should_show = True
                 state_text = "[bold green]Open[/]"
-            elif state == "Filtered" and (show_filtered or show_all):
+            elif state == "Filtered":
+                status_bar.filtered += 1
                 should_show = True
                 state_text = "[bold yellow]Filtered[/]"
-            elif state == "Closed" and show_all:
-                should_show = True
-                state_text = "[bold red]Closed[/]"
+            elif state == "Closed":
+                status_bar.closed += 1
 
             if should_show:
                 os_guess = guess_os(banner)
@@ -145,9 +167,13 @@ async def scan_target(target: str, ports: List[int], sem: asyncio.Semaphore, tab
     await asyncio.gather(*tasks)
 
 async def main(args):
+    start_time = time.time()
     targets = parse_targets(args.target)
     ports = parse_ports(args)
     sem = asyncio.Semaphore(1000)
+
+    status_bar = StatusBar()
+    results_list = []
 
     # UI Setup
     table = Table(title="VibeScan Results", expand=True)
@@ -167,7 +193,7 @@ async def main(args):
         expand=True
     )
 
-    group = Group(table, "", progress)
+    group = Group(table, "", status_bar, "", progress)
 
     total_scans = len(targets) * len(ports)
     task_id = progress.add_task("[cyan]Scanning...", total=total_scans)
@@ -175,11 +201,28 @@ async def main(args):
     # Use Live context manager to render the UI dynamically
     try:
         with Live(group, refresh_per_second=10, console=console, transient=False) as live:
-            target_tasks = [scan_target(t, ports, sem, table, progress, task_id, args.show_filtered, args.show_all) for t in targets]
+            target_tasks = [scan_target(t, ports, sem, table, progress, task_id, status_bar, results_list) for t in targets]
             await asyncio.gather(*target_tasks)
             
         if table.row_count == 0:
             console.print("\n[bold yellow]No open ports were found on the specified targets for the given ports.[/]")
+            
+        # Final Summary
+        time_taken = time.time() - start_time
+        summary_text = (
+            f"Total Ports Scanned: {total_scans}\n"
+            f"Time Taken: {time_taken:.2f} seconds\n\n"
+            f"[bold green]Open:[/] {status_bar.open}  |  "
+            f"[bold yellow]Filtered:[/] {status_bar.filtered}  |  "
+            f"[bold red]Closed:[/] {status_bar.closed}"
+        )
+        console.print(Panel(summary_text, title="Scan Report", border_style="cyan", expand=False))
+        
+        if args.output:
+            with open(args.output, 'w') as f:
+                json.dump(results_list, f, indent=4)
+            console.print(f"\n[bold green]Detailed results saved to {args.output}[/]")
+
     except KeyboardInterrupt:
         # Avoid traceback spam if someone presses Ctrl+C inside the Live block
         raise # We catch it outside
@@ -189,8 +232,7 @@ if __name__ == "__main__":
     parser.add_argument("target", help="IP, CIDR, or hostname to scan")
     parser.add_argument("-a", action="store_true", help="Scan all ports (1-65535)")
     parser.add_argument("-p", type=str, help="Comma-separated list of ports to scan (e.g., 22,80,443)")
-    parser.add_argument("--show-filtered", action="store_true", help="Include filtered ports in standard output")
-    parser.add_argument("--show-all", action="store_true", help="Include both filtered and closed ports")
+    parser.add_argument("-o", "--output", type=str, help="Output file to save detailed JSON log (e.g. vscan_results.json)")
     args = parser.parse_args()
 
     try:
