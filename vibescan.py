@@ -159,6 +159,9 @@ async def main(args):
         with Live(group, refresh_per_second=10, console=console, transient=False) as live:
             target_tasks = [scan_target(t, ports, sem, table, progress, task_id) for t in targets]
             await asyncio.gather(*target_tasks)
+            
+        if table.row_count == 0:
+            console.print("\n[bold yellow]No open ports were found on the specified targets for the given ports.[/]")
     except KeyboardInterrupt:
         # Avoid traceback spam if someone presses Ctrl+C inside the Live block
         raise # We catch it outside
