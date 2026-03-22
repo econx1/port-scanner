@@ -56,10 +56,10 @@ def get_service_name(port: int) -> str:
     except OSError:
         return "unknown"
 
-async def grab_banner(ip: str, port: int) -> Tuple[bool, str, str]:
-    """Attempt to connect, grab a banner, and return (is_open, service, banner)."""
+async def check_port(ip: str, port: int, timeout: float = 1.0) -> Tuple[str, str, str]:
+    """Attempt to connect, grab a banner, and return (state, service, banner)."""
     try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=1.5)
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=timeout)
         
         banner = b""
         try:
@@ -87,10 +87,15 @@ async def grab_banner(ip: str, port: int) -> Tuple[bool, str, str]:
         # Clean up the banner string: replace all whitespace/newlines with single space
         banner_str = re.sub(r'\s+', ' ', banner_str)[:100]
         
-        return True, get_service_name(port), banner_str
+        return "Open", get_service_name(port), banner_str
+    except asyncio.TimeoutError:
+        return "Filtered", get_service_name(port), "-"
+    except ConnectionRefusedError:
+        return "Closed", get_service_name(port), "-"
+    except OSError:
+        return "Closed", get_service_name(port), "-"
     except Exception:
-        # Connection failed or timed out -> port closed or filtered
-        return False, "", ""
+        return "Closed", get_service_name(port), "-"
 
 def guess_os(banner: str) -> str:
     """Fast guess OS fingerprinting based on banner keywords."""
@@ -113,15 +118,27 @@ def guess_os(banner: str) -> str:
     
     return "-"
 
-async def scan_target(target: str, ports: List[int], sem: asyncio.Semaphore, table: Table, progress: Progress, task_id: TaskID):
+async def scan_target(target: str, ports: List[int], sem: asyncio.Semaphore, table: Table, progress: Progress, task_id: TaskID, show_filtered: bool, show_all: bool):
     """Scan ports on a single target asynchronously."""
     async def scan_port(port: int):
         async with sem:
-            is_open, service, banner = await grab_banner(target, port)
-            if is_open:
+            state, service, banner = await check_port(target, port, timeout=1.0)
+            
+            should_show = False
+            if state == "Open":
+                should_show = True
+                state_text = "[bold green]Open[/]"
+            elif state == "Filtered" and (show_filtered or show_all):
+                should_show = True
+                state_text = "[bold yellow]Filtered[/]"
+            elif state == "Closed" and show_all:
+                should_show = True
+                state_text = "[bold red]Closed[/]"
+
+            if should_show:
                 os_guess = guess_os(banner)
                 display_banner = banner if banner else "-"
-                table.add_row(target, str(port), service, display_banner, os_guess)
+                table.add_row(target, str(port), state_text, service, display_banner, os_guess)
             progress.advance(task_id)
 
     tasks = [asyncio.create_task(scan_port(port)) for port in ports]
@@ -136,6 +153,7 @@ async def main(args):
     table = Table(title="VibeScan Results", expand=True)
     table.add_column("Target", style="cyan", no_wrap=True)
     table.add_column("Port", justify="right", style="magenta", no_wrap=True)
+    table.add_column("State", justify="center", no_wrap=True)
     table.add_column("Service", style="green", no_wrap=True)
     table.add_column("Banner", style="yellow")
     table.add_column("OS Guess", justify="center")
@@ -157,7 +175,7 @@ async def main(args):
     # Use Live context manager to render the UI dynamically
     try:
         with Live(group, refresh_per_second=10, console=console, transient=False) as live:
-            target_tasks = [scan_target(t, ports, sem, table, progress, task_id) for t in targets]
+            target_tasks = [scan_target(t, ports, sem, table, progress, task_id, args.show_filtered, args.show_all) for t in targets]
             await asyncio.gather(*target_tasks)
             
         if table.row_count == 0:
@@ -171,6 +189,8 @@ if __name__ == "__main__":
     parser.add_argument("target", help="IP, CIDR, or hostname to scan")
     parser.add_argument("-a", action="store_true", help="Scan all ports (1-65535)")
     parser.add_argument("-p", type=str, help="Comma-separated list of ports to scan (e.g., 22,80,443)")
+    parser.add_argument("--show-filtered", action="store_true", help="Include filtered ports in standard output")
+    parser.add_argument("--show-all", action="store_true", help="Include both filtered and closed ports")
     args = parser.parse_args()
 
     try:
